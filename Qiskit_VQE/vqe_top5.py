@@ -9,7 +9,7 @@ from qiskit.circuit.library import EfficientSU2
 from scipy.optimize import minimize
 from qiskit_ibm_runtime import Session
 from qiskit_ibm_runtime import EstimatorV2 as Estimator
-from qiskit.primitives import Sampler
+from qiskit.primitives import BaseSamplerV2 as Sampler
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
 
