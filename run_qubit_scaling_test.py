@@ -7,7 +7,6 @@
 import os
 import csv
 import time
-
 import matplotlib.pyplot as plt
 
 from Protein_Folding import Peptide
@@ -18,27 +17,9 @@ from Protein_Folding.protein_folding_problem import ProteinFoldingProblem
 
 def run_qubit_encoding_test(
     max_qubits: int = 157,
-    output_root: str = "Result/qubit_encoding_test"
+    output_root: str = "Result/qubit_encoding_test",
+    start_length: int = 5
 ):
-    """
-    Test qubit usage of the encoding method without calling any backend.
-
-    For sequence lengths starting from 1:
-      - Build a simple amino-acid sequence (e.g., "A" * length)
-      - Construct the protein folding Hamiltonian
-      - Record:
-          sequence length,
-          hamiltonian.num_qubits,
-          total_qubits = hamiltonian.num_qubits + 5,
-          Hamiltonian build time
-
-    Stop when total_qubits exceeds max_qubits.
-
-    Results:
-      - Save CSV in output_root
-      - Save plots in output_root
-    """
-
     os.makedirs(output_root, exist_ok=True)
 
     csv_path = os.path.join(output_root, "qubit_encoding_results.csv")
@@ -59,7 +40,7 @@ def run_qubit_encoding_test(
             ]
         )
 
-        length = 1
+        length = start_length
 
         while True:
             main_chain_sequence = "A" * length
@@ -118,10 +99,7 @@ def run_qubit_encoding_test(
     plt.ylabel("Total qubits (hamiltonian + 5)")
     plt.title("Total qubits vs amino acid sequence length")
     plt.grid(True)
-    total_qubits_plot_path = os.path.join(
-        output_root, "total_qubits_vs_sequence_length.png"
-    )
-    plt.savefig(total_qubits_plot_path, dpi=300)
+    plt.savefig(os.path.join(output_root, "total_qubits_vs_sequence_length.png"), dpi=300)
     plt.close()
 
     # Plot: Hamiltonian qubits vs sequence length
@@ -131,10 +109,7 @@ def run_qubit_encoding_test(
     plt.ylabel("Hamiltonian qubits")
     plt.title("Hamiltonian qubits vs amino acid sequence length")
     plt.grid(True)
-    hamiltonian_qubits_plot_path = os.path.join(
-        output_root, "hamiltonian_qubits_vs_sequence_length.png"
-    )
-    plt.savefig(hamiltonian_qubits_plot_path, dpi=300)
+    plt.savefig(os.path.join(output_root, "hamiltonian_qubits_vs_sequence_length.png"), dpi=300)
     plt.close()
 
     # Plot: Hamiltonian build time vs sequence length
@@ -144,22 +119,16 @@ def run_qubit_encoding_test(
     plt.ylabel("Hamiltonian build time (s)")
     plt.title("Hamiltonian build time vs amino acid sequence length")
     plt.grid(True)
-    build_time_plot_path = os.path.join(
-        output_root, "hamiltonian_build_time_vs_sequence_length.png"
-    )
-    plt.savefig(build_time_plot_path, dpi=300)
+    plt.savefig(os.path.join(output_root, "hamiltonian_build_time_vs_sequence_length.png"), dpi=300)
     plt.close()
 
     print("\nQubit encoding test finished.")
     print(f"CSV saved to: {csv_path}")
-    print("Plots saved to:")
-    print(f"  {total_qubits_plot_path}")
-    print(f"  {hamiltonian_qubits_plot_path}")
-    print(f"  {build_time_plot_path}")
 
 
 if __name__ == "__main__":
     run_qubit_encoding_test(
         max_qubits=157,
         output_root="Result/qubit_encoding_test",
+        start_length=5
     )
