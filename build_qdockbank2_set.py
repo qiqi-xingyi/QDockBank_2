@@ -11,8 +11,8 @@ import os
 import re
 import csv
 import json
+import math
 import shutil
-import time
 from collections import defaultdict
 
 import requests
@@ -30,11 +30,17 @@ INFO_CSV = "qdb2_protein_info.csv"
 
 MIN_LEN = 5
 MAX_LEN = 18
-EXTRA_PER_EXISTING = 9      # extra fragments per length that appears in v1
-EXTRA_PER_NEW = 15          # target per new length not in v1
-MAX_TOTAL_FRAGMENTS = 250
 
-# standard 20-aa mapping, extend if needed
+# Extra targets per length group
+# For lengths already present in v1: target = v1_count + EXTRA_PER_EXISTING
+# For new lengths: target = EXTRA_PER_NEW
+EXTRA_PER_EXISTING = 13  # previously 9, now +4 per group
+EXTRA_PER_NEW = 19       # previously 15, now +4 per group
+
+# Global cap on total number of fragments (v1 + new)
+MAX_TOTAL_FRAGMENTS = 320
+
+# Standard 20-aa mapping
 AA3_TO_AA1 = {
     "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D",
     "CYS": "C", "GLN": "Q", "GLU": "E", "GLY": "G",
@@ -61,7 +67,9 @@ def parse_v1_index(path):
     length_counts = defaultdict(int)
     pdb_ids = set()
 
-    pdb_line_pattern = re.compile(r"^\s*([0-9a-zA-Z]{4})\tChain\s+(\w)\tResidues\s+(\d+)-(\d+)\tlength=(\d+)\t(\S+)\s*$")
+    pdb_line_pattern = re.compile(
+        r"^\s*([0-9a-zA-Z]{4})\tChain\s+(\w)\tResidues\s+(\d+)-(\d+)\tlength=(\d+)\t(\S+)\s*$"
+    )
 
     with open(path, "r") as f:
         for line in f:
@@ -115,7 +123,6 @@ def parse_pocket_pdb(path):
                 resseq = int(line[22:26])
             except ValueError:
                 continue
-            # only keep the first occurrence per residue
             if resseq not in chains[chain_id]:
                 chains[chain_id][resseq] = resname
     return chains
@@ -202,21 +209,31 @@ def scan_pdbbind_for_new_fragments(
 ):
     """
     Scan PDBbind/P-L folders, find candidate fragments, and select new ones
-    based on length targets and non-duplicate sequences.
+    based on length targets, non-duplicate sequences, and a per-year cap
+    so that new fragments are more evenly distributed across year ranges.
     """
     target_counts = build_target_counts(length_counts_v1)
     selected_fragments = list(existing_fragments)  # start with v1
     current_counts = dict(length_counts_v1)
     total_fragments = len(existing_fragments)
 
-    pdb_source_map = {}  # pdb_id -> source_dir (for both v1 and new)
-
-    # Collect PDB IDs from v1 for later path fill
+    pdb_source_map = {}
     for frag in existing_fragments:
         pdb_source_map.setdefault(frag["pdb_id"], None)
 
-    # Walk through all year folders and PDB folders
-    for year_dir in sorted(os.listdir(base_root)):
+    # Determine year directories
+    year_dirs = [
+        d for d in sorted(os.listdir(base_root))
+        if os.path.isdir(os.path.join(base_root, d))
+    ]
+
+    # Per-year cap for new fragments (v1 fragments do not count here)
+    num_years = max(len(year_dirs), 1)
+    max_new_global = max_total - len(existing_fragments)
+    per_year_cap = max(1, math.ceil(max_new_global / num_years))
+    year_new_count = {yd: 0 for yd in year_dirs}
+
+    for year_dir in year_dirs:
         year_path = os.path.join(base_root, year_dir)
         if not os.path.isdir(year_path):
             continue
@@ -231,16 +248,17 @@ def scan_pdbbind_for_new_fragments(
             if not os.path.exists(pocket_path):
                 continue
 
-            # If this pdb_id appears in v1, record its source folder
+            # Record source dir for v1 pdb_ids
             if pdb_id_lower in pdb_source_map and pdb_source_map[pdb_id_lower] is None:
                 pdb_source_map[pdb_id_lower] = pdb_dir
 
-            # If we already have all targets and total cap reached, stop early
-            if total_fragments >= max_total and all(
-                current_counts.get(L, 0) >= target_counts[L]
-                for L in target_counts
-            ):
+            # Stop globally if total cap is reached
+            if total_fragments >= max_total:
                 break
+
+            # Stop selecting from this year if it reached per-year cap
+            if year_new_count[year_dir] >= per_year_cap:
+                continue
 
             chains = parse_pocket_pdb(pocket_path)
             for chain_id, res_map in chains.items():
@@ -255,12 +273,16 @@ def scan_pdbbind_for_new_fragments(
                         if L < MIN_LEN or L > MAX_LEN:
                             continue
 
-                        # If we already hit target for this length, skip
+                        # Per-length target
                         if current_counts.get(L, 0) >= target_counts[L]:
                             continue
 
-                        # Check global cap
+                        # Global cap
                         if total_fragments >= max_total:
+                            break
+
+                        # Per-year cap for new fragments
+                        if year_new_count[year_dir] >= per_year_cap:
                             break
 
                         frag = {
@@ -279,17 +301,16 @@ def scan_pdbbind_for_new_fragments(
                         used_sequences.add(seq)
                         current_counts[L] = current_counts.get(L, 0) + 1
                         total_fragments += 1
+                        year_new_count[year_dir] += 1
                         pdb_source_map.setdefault(pdb_id_lower, pdb_dir)
 
-                    if total_fragments >= max_total:
+                    if total_fragments >= max_total or year_new_count[year_dir] >= per_year_cap:
                         break
-                if total_fragments >= max_total:
+                if total_fragments >= max_total or year_new_count[year_dir] >= per_year_cap:
                     break
-        else:
-            # continue outer if not broken
-            continue
-        # outer break
-        break
+
+        if total_fragments >= max_total:
+            break
 
     return selected_fragments, pdb_source_map
 
@@ -364,7 +385,6 @@ def copy_selected_folders(pdb_source_map, output_root):
             continue
         dst = os.path.join(output_root, pdb_id)
         if os.path.exists(dst):
-            # optionally skip or overwrite
             continue
         shutil.copytree(src, dst)
 
@@ -375,7 +395,9 @@ def copy_selected_folders(pdb_source_map, output_root):
 
 def main():
     # Step 1: v1 fragments
-    v1_frags, used_seqs, length_counts_v1, pdb_source_map_v1 = parse_v1_index(V1_INDEX_PATH)
+    v1_frags, used_seqs, length_counts_v1, pdb_source_map_v1 = parse_v1_index(
+        V1_INDEX_PATH
+    )
     print(f"Loaded {len(v1_frags)} v1 fragments.")
     print("Length distribution in v1:", dict(sorted(length_counts_v1.items())))
 
