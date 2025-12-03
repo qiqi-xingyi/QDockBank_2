@@ -14,7 +14,6 @@ from Qiskit_VQE import VQE5
 from Qiskit_VQE import StateCalculator
 import time
 
-
 def predict_protein_structure(
     main_chain_sequence: str,
     protein_id: str,
