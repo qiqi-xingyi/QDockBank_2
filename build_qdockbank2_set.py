@@ -205,36 +205,27 @@ def scan_pdbbind_for_new_fragments(
     length_counts_v1,
     max_total=MAX_TOTAL_FRAGMENTS,
 ):
-    """
-    Scan PDBbind/P-L folders, find candidate fragments, and select new ones.
-
-    Rules:
-      - Start from existing v1 fragments.
-      - For v2_new, at most ONE fragment per pdb_id.
-      - Only pick fragments with length in [MIN_LEN, MAX_LEN].
-      - Avoid duplicate sequences.
-      - Approximate per-length targets and per-year balance.
-    """
+    import random
     random.seed(123)
 
     target_counts = build_target_counts(length_counts_v1)
-    selected_fragments = list(existing_fragments)  # include v1
+    selected_fragments = list(existing_fragments)
     current_counts = dict(length_counts_v1)
     total_fragments = len(existing_fragments)
 
-    # Record where each pdb comes from
+    existing_pdb_ids = {frag["pdb_id"] for frag in existing_fragments}
+
     pdb_source_map = {}
     for frag in existing_fragments:
         pdb_source_map.setdefault(frag["pdb_id"], frag.get("source_dir", None))
 
-    # v2_new constraint: at most one fragment per pdb_id
     used_new_pdb_ids = set()
 
-    # Year directories
     year_dirs = [
-        d for d in sorted(os.listdir(base_root))
+        d for d in os.listdir(base_root)
         if os.path.isdir(os.path.join(base_root, d))
     ]
+    random.shuffle(year_dirs)
 
     num_years = max(len(year_dirs), 1)
     max_new_global = max_total - len(existing_fragments)
@@ -246,34 +237,33 @@ def scan_pdbbind_for_new_fragments(
         if not os.path.isdir(year_path):
             continue
 
-        for pdb_id in sorted(os.listdir(year_path)):
+        pdb_ids = [
+            d for d in os.listdir(year_path)
+            if os.path.isdir(os.path.join(year_path, d))
+        ]
+        random.shuffle(pdb_ids)
+
+        for pdb_id in pdb_ids:
             pdb_dir = os.path.join(year_path, pdb_id)
-            if not os.path.isdir(pdb_dir):
+            pdb_id_lower = pdb_id.lower()
+
+            if total_fragments >= max_total:
+                break
+            if year_new_count[year_dir] >= per_year_cap:
+                continue
+            if pdb_id_lower in existing_pdb_ids:
+                continue
+            if pdb_id_lower in used_new_pdb_ids:
                 continue
 
-            pdb_id_lower = pdb_id.lower()
             pocket_path = os.path.join(pdb_dir, f"{pdb_id_lower}_pocket.pdb")
             if not os.path.exists(pocket_path):
                 continue
 
-            # global cap
-            if total_fragments >= max_total:
-                break
-
-            # per-year cap
-            if year_new_count[year_dir] >= per_year_cap:
-                continue
-
-            # only one v2_new fragment per pdb_id
-            if pdb_id_lower in used_new_pdb_ids:
-                continue
-
-            # record source dir (for copying later)
             pdb_source_map.setdefault(pdb_id_lower, pdb_dir)
 
-            # parse residues and collect all candidate subfragments for this pdb
             chains = parse_pocket_pdb(pocket_path)
-            candidates = []  # (chain_id, L, res_start, res_end, seq)
+            candidates = []
 
             for chain_id, res_map in chains.items():
                 runs = residues_to_fragments(res_map, pdb_id_lower, chain_id)
@@ -282,17 +272,14 @@ def scan_pdbbind_for_new_fragments(
                         pdb_id_lower, chain_id, run_start, run_end, aa_list
                     )
                     for L, res_start, res_end, seq in subfrags:
-                        if L < MIN_LEN or L > MAX_LEN:
-                            continue
-                        candidates.append((chain_id, L, res_start, res_end, seq))
+                        if MIN_LEN <= L <= MAX_LEN:
+                            candidates.append((chain_id, L, res_start, res_end, seq))
 
             if not candidates:
                 continue
 
-            # randomize candidates so we do not always pick the same pattern
             random.shuffle(candidates)
 
-            # try to pick exactly ONE fragment for this pdb
             chosen = None
             for chain_id, L, res_start, res_end, seq in candidates:
                 if seq in used_sequences:
@@ -331,7 +318,6 @@ def scan_pdbbind_for_new_fragments(
             break
 
     return selected_fragments, pdb_source_map
-
 
 
 # ------------------------
@@ -408,6 +394,26 @@ def copy_selected_folders(pdb_source_map, output_root):
         shutil.copytree(src, dst)
 
 
+def deduplicate_fragments(fragments):
+    """
+    Remove duplicate fragments based on a unique key:
+    (pdb_id, chain_id, res_start, res_end, sequence).
+    """
+    seen = set()
+    unique = []
+    for frag in fragments:
+        key = (
+            frag["pdb_id"],
+            frag["chain_id"],
+            frag["res_start"],
+            frag["res_end"],
+            frag["sequence"],
+        )
+        if key not in seen:
+            seen.add(key)
+            unique.append(frag)
+    return unique
+
 # ------------------------
 # Step 5: main
 # ------------------------
@@ -428,7 +434,12 @@ def main():
         length_counts_v1=length_counts_v1,
         max_total=MAX_TOTAL_FRAGMENTS,
     )
-    print(f"Total selected fragments (v1 + new): {len(selected_frags)}")
+
+    print(f"Selected fragments before dedup: {len(selected_frags)}")
+
+    selected_frags = deduplicate_fragments(selected_frags)
+
+    print(f"Selected fragments after dedup: {len(selected_frags)}")
 
     # Step 3: write fragment CSV
     with open(FRAGMENT_CSV, "w", newline="") as f:
