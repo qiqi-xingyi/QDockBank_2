@@ -15,7 +15,7 @@ from scipy.optimize import minimize
 from qiskit_ibm_runtime import Session
 from qiskit_ibm_runtime import EstimatorV2 as Estimator
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
-from qiskit.primitives import SamplerV2 as LocalSampler
+from qiskit.primitives import BaseSamplerV2 as LocalSampler
 from qiskit.primitives.containers import PrimitiveResult, PubResult, DataBin
 
 
