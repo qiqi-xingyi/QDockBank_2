@@ -104,9 +104,10 @@ if __name__ == '__main__':
 
     service = QiskitRuntimeService(
         channel='ibm_quantum',
-        instance=' ',  # Replace with your real instance
+        instance='crn:v1:bluemix:public:quantum-computing:us-east:a/813b37ffee14414ca81092ab94341434:a6d3c234-40d8-4ddd-afd4-b8ad9b5b4d48::',  # Replace with your real instance
         token=' '      # Replace with your real token
     )
+
 
     protein_list = [
         ("DGKMKGLAF", "1qin"),
