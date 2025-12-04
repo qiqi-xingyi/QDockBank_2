@@ -4,9 +4,7 @@
 # @Email : yzhan135@kent.edu
 # @File:build_qdockbank2_set.py
 
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
+import random
 import os
 import re
 import csv
@@ -208,26 +206,36 @@ def scan_pdbbind_for_new_fragments(
     max_total=MAX_TOTAL_FRAGMENTS,
 ):
     """
-    Scan PDBbind/P-L folders, find candidate fragments, and select new ones
-    based on length targets, non-duplicate sequences, and a per-year cap
-    so that new fragments are more evenly distributed across year ranges.
+    Scan PDBbind/P-L folders, find candidate fragments, and select new ones.
+
+    Rules:
+      - Start from existing v1 fragments.
+      - For v2_new, at most ONE fragment per pdb_id.
+      - Only pick fragments with length in [MIN_LEN, MAX_LEN].
+      - Avoid duplicate sequences.
+      - Approximate per-length targets and per-year balance.
     """
+    random.seed(123)
+
     target_counts = build_target_counts(length_counts_v1)
-    selected_fragments = list(existing_fragments)  # start with v1
+    selected_fragments = list(existing_fragments)  # include v1
     current_counts = dict(length_counts_v1)
     total_fragments = len(existing_fragments)
 
+    # Record where each pdb comes from
     pdb_source_map = {}
     for frag in existing_fragments:
-        pdb_source_map.setdefault(frag["pdb_id"], None)
+        pdb_source_map.setdefault(frag["pdb_id"], frag.get("source_dir", None))
 
-    # Determine year directories
+    # v2_new constraint: at most one fragment per pdb_id
+    used_new_pdb_ids = set()
+
+    # Year directories
     year_dirs = [
         d for d in sorted(os.listdir(base_root))
         if os.path.isdir(os.path.join(base_root, d))
     ]
 
-    # Per-year cap for new fragments (v1 fragments do not count here)
     num_years = max(len(year_dirs), 1)
     max_new_global = max_total - len(existing_fragments)
     per_year_cap = max(1, math.ceil(max_new_global / num_years))
@@ -248,71 +256,82 @@ def scan_pdbbind_for_new_fragments(
             if not os.path.exists(pocket_path):
                 continue
 
-            # Record source dir for v1 pdb_ids
-            if pdb_id_lower in pdb_source_map and pdb_source_map[pdb_id_lower] is None:
-                pdb_source_map[pdb_id_lower] = pdb_dir
-
-            # Stop globally if total cap is reached
+            # global cap
             if total_fragments >= max_total:
                 break
 
-            # Stop selecting from this year if it reached per-year cap
+            # per-year cap
             if year_new_count[year_dir] >= per_year_cap:
                 continue
 
+            # only one v2_new fragment per pdb_id
+            if pdb_id_lower in used_new_pdb_ids:
+                continue
+
+            # record source dir (for copying later)
+            pdb_source_map.setdefault(pdb_id_lower, pdb_dir)
+
+            # parse residues and collect all candidate subfragments for this pdb
             chains = parse_pocket_pdb(pocket_path)
+            candidates = []  # (chain_id, L, res_start, res_end, seq)
+
             for chain_id, res_map in chains.items():
                 runs = residues_to_fragments(res_map, pdb_id_lower, chain_id)
                 for run_start, run_end, aa_list in runs:
-                    candidates = generate_candidate_subfragments(
+                    subfrags = generate_candidate_subfragments(
                         pdb_id_lower, chain_id, run_start, run_end, aa_list
                     )
-                    for L, res_start, res_end, seq in candidates:
-                        if seq in used_sequences:
-                            continue
+                    for L, res_start, res_end, seq in subfrags:
                         if L < MIN_LEN or L > MAX_LEN:
                             continue
+                        candidates.append((chain_id, L, res_start, res_end, seq))
 
-                        # Per-length target
-                        if current_counts.get(L, 0) >= target_counts[L]:
-                            continue
+            if not candidates:
+                continue
 
-                        # Global cap
-                        if total_fragments >= max_total:
-                            break
+            # randomize candidates so we do not always pick the same pattern
+            random.shuffle(candidates)
 
-                        # Per-year cap for new fragments
-                        if year_new_count[year_dir] >= per_year_cap:
-                            break
-
-                        frag = {
-                            "pdb_id": pdb_id_lower,
-                            "chain_id": chain_id,
-                            "res_start": res_start,
-                            "res_end": res_end,
-                            "length": L,
-                            "sequence": seq,
-                            "source_pocket_path": pocket_path,
-                            "source_dir": pdb_dir,
-                            "origin": "v2_new",
-                        }
-
-                        selected_fragments.append(frag)
-                        used_sequences.add(seq)
-                        current_counts[L] = current_counts.get(L, 0) + 1
-                        total_fragments += 1
-                        year_new_count[year_dir] += 1
-                        pdb_source_map.setdefault(pdb_id_lower, pdb_dir)
-
-                    if total_fragments >= max_total or year_new_count[year_dir] >= per_year_cap:
-                        break
-                if total_fragments >= max_total or year_new_count[year_dir] >= per_year_cap:
+            # try to pick exactly ONE fragment for this pdb
+            chosen = None
+            for chain_id, L, res_start, res_end, seq in candidates:
+                if seq in used_sequences:
+                    continue
+                if current_counts.get(L, 0) >= target_counts[L]:
+                    continue
+                if total_fragments >= max_total:
                     break
+                if year_new_count[year_dir] >= per_year_cap:
+                    break
+
+                chosen = {
+                    "pdb_id": pdb_id_lower,
+                    "chain_id": chain_id,
+                    "res_start": res_start,
+                    "res_end": res_end,
+                    "length": L,
+                    "sequence": seq,
+                    "source_pocket_path": pocket_path,
+                    "source_dir": pdb_dir,
+                    "origin": "v2_new",
+                }
+                break
+
+            if chosen is None:
+                continue
+
+            selected_fragments.append(chosen)
+            used_sequences.add(chosen["sequence"])
+            current_counts[chosen["length"]] = current_counts.get(chosen["length"], 0) + 1
+            total_fragments += 1
+            year_new_count[year_dir] += 1
+            used_new_pdb_ids.add(pdb_id_lower)
 
         if total_fragments >= max_total:
             break
 
     return selected_fragments, pdb_source_map
+
 
 
 # ------------------------
@@ -440,6 +459,26 @@ def main():
                 ]
             )
     print(f"Fragment summary written to {FRAGMENT_CSV}")
+
+    # Sanity check: ensure v2_new fragments have unique pdb_id
+    v2_new_pdb_ids = set()
+    v2_new_duplicates = set()
+    with open(FRAGMENT_CSV, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["origin"] != "v2_new":
+                continue
+            pid = row["pdb_id"]
+            if pid in v2_new_pdb_ids:
+                v2_new_duplicates.add(pid)
+            else:
+                v2_new_pdb_ids.add(pid)
+
+    print(f"Number of v2_new fragments: {len(v2_new_pdb_ids)}")
+    if v2_new_duplicates:
+        print("WARNING: duplicated pdb_id in v2_new:", sorted(v2_new_duplicates))
+    else:
+        print("All v2_new pdb_id are unique.")
 
     # Step 4: fetch RCSB info
     pdb_ids = set(pdb_source_map_all.keys())
