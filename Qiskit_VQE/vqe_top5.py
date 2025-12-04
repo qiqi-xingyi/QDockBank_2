@@ -1,9 +1,8 @@
-# --*-- conding:utf-8 --*--
-# @Time : 11/3/25 1:49 PM
+# --*-- coding:utf-8 --*--
+# @Time : 11/3/25 1:49 PM
 # @Author : Yuqi Zhang
 # @Email : yzhan135@kent.edu
 # @File : vqe_top5.py
-
 
 import time
 from datetime import datetime
@@ -15,25 +14,26 @@ from scipy.optimize import minimize
 
 from qiskit_ibm_runtime import Session
 from qiskit_ibm_runtime import EstimatorV2 as Estimator
-from qiskit_ibm_runtime import SamplerV2 as RuntimeSampler
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+from qiskit.primitives import SamplerV2 as LocalSampler
 from qiskit.primitives.containers import PrimitiveResult, PubResult, DataBin
 
 
 class VQE5:
     """
     Variational Quantum Eigensolver (VQE) using IBM Quantum Runtime (Qiskit 2.0 style).
-    This class is instrumented to record full timing and raw job results for analysis.
+    Estimator runs on real hardware via IBM Runtime.
+    Probability measurement is performed using the local Sampler simulator.
     """
 
     def __init__(
-            self,
-            service,
-            hamiltonian,
-            optimization_level: int = 3,
-            shots: int = 200,
-            min_qubit_num: int = 100,
-            maxiter: int = 20,
+        self,
+        service,
+        hamiltonian,
+        optimization_level: int = 3,
+        shots: int = 200,
+        min_qubit_num: int = 100,
+        maxiter: int = 20,
     ):
         """
         Parameters
@@ -63,11 +63,11 @@ class VQE5:
         self.maxiter = maxiter
         self.iteration_results: List[tuple[float, np.ndarray]] = []
 
-        # New: detailed logs per estimator evaluation
+        # Detailed logs per estimator evaluation
         self.iter_logs: List[Dict[str, Any]] = []
         self.iter_raw_results: List[Dict[str, Any]] = []
 
-        # New: detailed logs for sampler calls
+        # Detailed logs for sampler calls (now local simulator)
         self.sampler_logs: List[Dict[str, Any]] = []
 
     # -------------------------------------------------------------------------
@@ -75,8 +75,8 @@ class VQE5:
     # -------------------------------------------------------------------------
     def _select_backend(self, min_qubits: int):
         """
-        Select a backend with enough qubits. In your CC environment
-        this will typically resolve to ibm_cleveland.
+        Select a backend with enough qubits. In your CC environment this will
+        typically resolve to ibm_cleveland.
         """
         backend = self.service.least_busy(
             simulator=False,
@@ -142,24 +142,21 @@ class VQE5:
         return out
 
     # -------------------------------------------------------------------------
-    # VQE core: cost function
+    # VQE core: cost function (Estimator on real hardware)
     # -------------------------------------------------------------------------
     def cost_func(self, params, ansatz_isa, hamiltonian_isa, estimator):
         """
         Cost function for the VQE optimization. One call corresponds to
         one EstimatorV2 evaluation (one Runtime job).
         """
-        # Build pub
         pub = (ansatz_isa, [hamiltonian_isa], [params])
 
         iter_index = self.cost_history_dict["iters"] + 1
         wall_start = time.time()
         ts_start = datetime.now().isoformat()
 
-        # Submit job
         job = estimator.run(pubs=[pub])
 
-        # Collect job information (where supported)
         job_id = None
         creation_date = None
         usage = None
@@ -176,15 +173,12 @@ class VQE5:
         except Exception:
             usage = None
 
-        # Wait for result
         result: PrimitiveResult = job.result()
         wall_end = time.time()
         ts_end = datetime.now().isoformat()
 
-        # Extract energy (assume 1 pub, 1 observable)
         energy = float(result[0].data.evs[0])
 
-        # Original bookkeeping
         self.energy_list.append(energy)
         self.iteration_results.append((energy, np.array(params, copy=True)))
         self.cost_history_dict["iters"] = iter_index
@@ -193,7 +187,6 @@ class VQE5:
 
         print(f"Iter {iter_index} done. Energy = {energy}")
 
-        # Detailed log for this iteration
         iter_log: Dict[str, Any] = {
             "iter": iter_index,
             "timestamp_start": ts_start,
@@ -209,7 +202,6 @@ class VQE5:
         }
         self.iter_logs.append(iter_log)
 
-        # Store full raw primitive result for this iteration
         raw_dict = self._primitive_result_to_dict(result)
         self.iter_raw_results.append(
             {
@@ -222,12 +214,12 @@ class VQE5:
         return energy
 
     # -------------------------------------------------------------------------
-    # Probability distribution (Sampler) with logging
+    # Probability distribution (Sampler) with logging -- NOW LOCAL SIMULATOR
     # -------------------------------------------------------------------------
     def get_probability_distribution(self, optimized_params, tag: str | None = None) -> Dict[str, float]:
         """
-        Compute probability distribution of bitstrings for given parameters using SamplerV2
-        on the same backend. Also log full job timing and raw sampler result.
+        Compute probability distribution of bitstrings for given parameters using
+        the local SamplerV2 simulator (no IBM Runtime calls).
 
         Parameters
         ----------
@@ -242,54 +234,40 @@ class VQE5:
         wall_start = time.time()
         ts_start = datetime.now().isoformat()
 
-        with Session(backend=self.backend) as session:
-            sampler = RuntimeSampler(mode=session)
-            sampler.options.default_shots = self.shots
+        sampler = LocalSampler()
+        sampler.options.default_shots = self.shots
 
-            job = sampler.run([circuit])
+        job = sampler.run([circuit])
+        # Local Sampler job_id is not an IBM runtime job, but we keep it for traceability if present.
+        job_id = None
+        try:
+            job_id = job.job_id()
+        except Exception:
+            pass
 
-            job_id = None
-            creation_date = None
-            usage = None
-            try:
-                job_id = job.job_id()
-            except Exception:
-                pass
-            try:
-                creation_date = job.creation_date
-            except Exception:
-                pass
-            try:
-                usage = job.usage_estimation()
-            except Exception:
-                usage = None
-
-            result: PrimitiveResult = job.result()
+        result: PrimitiveResult = job.result()
 
         wall_end = time.time()
         ts_end = datetime.now().isoformat()
 
-        # Qiskit 2.x SamplerV2: measurement register is usually 'meas' when using measure_all()
         pub = result[0]
         quasi_list = pub.data.meas.get_quasi_dists()
         quasi = quasi_list[0]
         prob_dict = {bitstr: float(prob) for bitstr, prob in quasi.items()}
 
-        # Log sampler call
         sampler_log: Dict[str, Any] = {
             "tag": tag,
             "timestamp_start": ts_start,
             "timestamp_end": ts_end,
             "wall_time_sec": wall_end - wall_start,
-            "backend": getattr(self.backend, "name", None),
+            "backend": "local_sampler",
             "shots": self.shots,
             "job_id": job_id,
-            "job_creation_date": creation_date.isoformat() if hasattr(creation_date, "isoformat") else None,
-            "usage_estimation": self._to_serializable(usage),
+            "job_creation_date": None,
+            "usage_estimation": None,
         }
         self.sampler_logs.append(sampler_log)
 
-        # Store raw sampler result
         raw_sampler_dict = self._primitive_result_to_dict(result)
         self.sampler_logs[-1]["primitive_result"] = raw_sampler_dict
 
