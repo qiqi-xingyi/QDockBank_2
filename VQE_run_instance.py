@@ -7,6 +7,8 @@
 import os
 import csv
 import time
+import json
+from datetime import datetime
 
 from Protein_Folding import Peptide
 from Protein_Folding.interactions.miyazawa_jernigan_interaction import MiyazawaJerniganInteraction
@@ -19,16 +21,18 @@ from Qiskit_VQE import VQE5, StateCalculator
 
 def predict_protein_structure(
     main_chain_sequence: str,
-    protein_id: str,
+    fragment_id: str,
+    pdb_id: str,
     service: QiskitRuntimeService,
     max_iter: int = 2,
 ):
     """
     Run the quantum VQE workflow for a protein fragment and save all results into
-    Quantum_result/{protein_id}/
+    Quantum_result/{pdb_id}/
     """
 
-    print(f"Starting prediction for protein fragment: {protein_id}")
+    print(f"Starting prediction for fragment: {fragment_id}")
+    print(f"PDB ID: {pdb_id}")
     print(f"Sequence: {main_chain_sequence}")
 
     # Side-chain placeholder (empty)
@@ -60,22 +64,37 @@ def predict_protein_structure(
     print("VQE optimization finished.")
 
     # === Output directory ===
-    output_dir = os.path.join("Quantum_result", protein_id)
+    # Folder is named only by PDB ID
+    output_dir = os.path.join("Quantum_result", pdb_id)
     os.makedirs(output_dir, exist_ok=True)
 
     # 1) Save energy trajectory
-    energy_file = os.path.join(output_dir, "energy_list.txt")
+    energy_file = os.path.join(output_dir, f"{fragment_id}_energy_list.txt")
     with open(energy_file, "w") as f:
         for val in energy_list:
             f.write(f"{val}\n")
     print(f"Energy list saved: {energy_file}")
+
+    # 1.1) Save detailed VQE iteration logs (timestamps, job info, etc.)
+    iter_log_file = os.path.join(output_dir, f"{fragment_id}_vqe_iter_logs.json")
+    if hasattr(vqe_instance, "iter_logs"):
+        with open(iter_log_file, "w") as f:
+            json.dump(vqe_instance.iter_logs, f, indent=2, default=str)
+        print(f"VQE iteration logs saved: {iter_log_file}")
+
+    # 1.2) Save raw PrimitiveResult data for each iteration (if available)
+    raw_result_file = os.path.join(output_dir, f"{fragment_id}_vqe_raw_results.json")
+    if hasattr(vqe_instance, "iter_raw_results"):
+        with open(raw_result_file, "w") as f:
+            json.dump(vqe_instance.iter_raw_results, f, indent=2, default=str)
+        print(f"VQE raw primitive results saved: {raw_result_file}")
 
     # 2) Compute probability distribution for the final parameters
     state_calculator = StateCalculator(service, qubits_num, ansatz)
     print("Computing probability distribution for final parameters...")
     probability_distribution = state_calculator.get_probability_distribution(res)
 
-    prob_file = os.path.join(output_dir, "prob_distribution.txt")
+    prob_file = os.path.join(output_dir, f"{fragment_id}_prob_distribution.txt")
     with open(prob_file, "w") as f:
         for bitstring, prob in probability_distribution.items():
             f.write(f"{bitstring}: {prob}\n")
@@ -83,8 +102,8 @@ def predict_protein_structure(
 
     # 3) Interpret final structure and save as XYZ
     protein_result = protein_folding_problem.interpret(probability_distribution)
-    protein_result.save_xyz_file(name=protein_id, path=output_dir)
-    print(f"Main XYZ saved: {protein_id}.xyz")
+    protein_result.save_xyz_file(name=fragment_id, path=output_dir)
+    print(f"Main XYZ saved: {fragment_id}.xyz")
 
     # 4) Top-K VQE results
     for rank, (energy_val, best_params) in enumerate(top_results, start=1):
@@ -92,16 +111,24 @@ def predict_protein_structure(
 
         prob_dist_best = state_calculator.get_probability_distribution(best_params)
         protein_result_best = protein_folding_problem.interpret(prob_dist_best)
-        xyz_name = f"{protein_id}_top_{rank}"
+        xyz_name = f"{fragment_id}_top_{rank}"
 
         protein_result_best.save_xyz_file(name=xyz_name, path=output_dir)
         print(f"Top {rank} XYZ saved: {xyz_name}.xyz")
 
-    print(f"Fragment {protein_id} finished.\n")
+    print(f"Fragment {fragment_id} finished.\n")
 
 
 def load_first_fragment_from_csv(csv_path: str):
-    """Load the first fragment from QDB2 CSV."""
+    """
+    Load the first fragment from QDB2 CSV.
+
+    Returns
+    -------
+    sequence : str
+    pdb_id : str
+    fragment_id : str  (pdb_id + chain_id + residue range)
+    """
     with open(csv_path, "r") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -114,13 +141,13 @@ def load_first_fragment_from_csv(csv_path: str):
             fragment_id = f"{pdb_id}{chain_id}_{res_start}_{res_end}"
 
             print("CSV fragment loaded:")
-            print(f"  pdb_id   = {pdb_id}")
-            print(f"  chain_id = {chain_id}")
-            print(f"  res      = {res_start}-{res_end}")
-            print(f"  sequence = {sequence}")
+            print(f"  pdb_id      = {pdb_id}")
+            print(f"  chain_id    = {chain_id}")
+            print(f"  res         = {res_start}-{res_end}")
+            print(f"  sequence    = {sequence}")
             print(f"  fragment_id = {fragment_id}")
 
-            return sequence, fragment_id
+            return sequence, pdb_id, fragment_id
 
     raise RuntimeError("No fragment rows found in CSV.")
 
@@ -135,24 +162,28 @@ if __name__ == "__main__":
     print(f"Available backends: {[b.name for b in backends]}")
 
     csv_path = os.path.join("Input_Data", "qdb2_fragments.csv")
-    sequence, fragment_id = load_first_fragment_from_csv(csv_path)
+    sequence, pdb_id, fragment_id = load_first_fragment_from_csv(csv_path)
 
-    # Log runtime
+    # Log runtime (fragment-level)
     log_file = "execution_time_log_qdb2_test.txt"
     with open(log_file, "w") as lf:
-        lf.write("Fragment_ID\tExecution_Time(s)\n")
+        lf.write("Fragment_ID\tPDB_ID\tStart_Time\tEnd_Time\tExecution_Time(s)\n")
 
+        start_ts = datetime.now().isoformat()
         start_time = time.time()
 
         predict_protein_structure(
             main_chain_sequence=sequence,
-            protein_id=fragment_id,
+            fragment_id=fragment_id,
+            pdb_id=pdb_id,
             service=service,
             max_iter=3,
         )
 
         end_time = time.time()
-        lf.write(f"{fragment_id}\t{end_time - start_time:.2f}\n")
+        end_ts = datetime.now().isoformat()
+        elapsed = end_time - start_time
+
+        lf.write(f"{fragment_id}\t{pdb_id}\t{start_ts}\t{end_ts}\t{elapsed:.2f}\n")
 
     print("Done.")
-
