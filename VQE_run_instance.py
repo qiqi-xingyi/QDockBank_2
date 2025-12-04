@@ -21,7 +21,7 @@ def predict_protein_structure(
     main_chain_sequence: str,
     protein_id: str,
     service: QiskitRuntimeService,
-    max_iter: int = 150,
+    max_iter: int = 2,
 ):
     """
     Run the quantum VQE workflow for a protein fragment and save all results into
@@ -148,7 +148,7 @@ if __name__ == "__main__":
             main_chain_sequence=sequence,
             protein_id=fragment_id,
             service=service,
-            max_iter=150,
+            max_iter=3,
         )
 
         end_time = time.time()
